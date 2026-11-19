@@ -1,0 +1,92 @@
+name: Build
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: 0utkastt666/Kastt-FiveM-Tools
+  CODEWALKER_COMMIT: 485d56bec00262ed7fa472261cce7bbc6202b96e
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.v.outputs.build }}
+    steps:
+      - name: Look for a new version
+        id: v
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$SOURCE_TOKEN" ]; then
+            echo "::warning::Add the SOURCE_TOKEN secret first."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/$SOURCE_REPO/contents/app/package.json" -H "Accept: application/vnd.github.raw" | jq -r .version)
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Could not read the version from $SOURCE_REPO."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "v$version is already released."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          path: src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Get CodeWalker's core library
+        shell: pwsh
+        working-directory: src
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force external | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri "https://codeload.github.com/dexyfex/CodeWalker/zip/$env:CODEWALKER_COMMIT" -OutFile external/codewalker.zip
+          Expand-Archive external/codewalker.zip -DestinationPath external/tmp -Force
+          Move-Item "external/tmp/CodeWalker-$env:CODEWALKER_COMMIT" external/CodeWalker
+          Remove-Item external/codewalker.zip, external/tmp -Recurse -Force
+          Remove-Item external/CodeWalker/CodeWalker.Core/Utils/Fbx.cs, external/CodeWalker/CodeWalker.Core/Utils/FbxConverter.cs -Force -ErrorAction SilentlyContinue
+
+      - name: Build the helper
+        working-directory: src
+        run: dotnet publish helper/OrbitStudio.Helper.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o helper/publish --nologo
+
+      - name: Build and publish the installer
+        working-directory: src/app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run release
