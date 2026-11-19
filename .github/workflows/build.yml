@@ -87,4 +87,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           npm install --no-audit --no-fund
-          npm run release
+          npm run dist
+
+      - name: Upload the release
+        shell: pwsh
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = (Get-Content app/package.json -Raw | ConvertFrom-Json).version
+          ./tools/publish.ps1 -Version $v
